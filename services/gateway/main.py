@@ -1,115 +1,157 @@
 import httpx
+import pybreaker
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 import itertools
+from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
+
+# --- IMPORTACIONES DE OBSERVABILIDAD ---
+from opentelemetry import trace
+from opentelemetry.exporter.jaeger.thrift import JaegerExporter
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from prometheus_client import Counter, generate_latest, CONTENT_TYPE_LATEST
+from starlette.responses import Response
 
 app = FastAPI(title="Wakanda API Gateway")
 
-# Configuración de Consul
+
+# --- CONFIGURACION TELEMETRIA ---
+def setup_telemetry(service_name):
+    # 1. Configurar Jaeger (Tracing)
+    resource = Resource(attributes={"service.name": service_name})
+    trace.set_tracer_provider(TracerProvider(resource=resource))
+
+    jaeger_exporter = JaegerExporter(
+        agent_host_name="jaeger",
+        agent_port=6831,
+    )
+
+    span_processor = BatchSpanProcessor(jaeger_exporter)
+    trace.get_tracer_provider().add_span_processor(span_processor)
+
+    # Instrumentar FastAPI automaticamente
+    FastAPIInstrumentor.instrument_app(app)
+
+
+# Llamamos a la configuracion
+setup_telemetry("gateway_service")
+
+# 2. Configurar Metricas (Prometheus)
+REQUEST_COUNT = Counter("http_requests_total", "Total de peticiones HTTP", ["method", "endpoint", "status"])
+
+
+# Middleware para contar peticiones en Prometheus
+@app.middleware("http")
+async def prometheus_middleware(request: Request, call_next):
+    method = request.method
+    path = request.url.path
+
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        REQUEST_COUNT.labels(method=method, endpoint=path, status=status).inc()
+        return response
+    except Exception as e:
+        REQUEST_COUNT.labels(method=method, endpoint=path, status=500).inc()
+        raise e
+
+
+# Endpoint para que Prometheus lea las metricas
+@app.get("/metrics")
+def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+# --- FIN CONFIGURACION TELEMETRIA ---
+
 CONSUL_URL = "http://consul:8500/v1/catalog/service"
-
-# Cliente HTTP asíncrono global
 client = httpx.AsyncClient()
-
-# Diccionario para guardar el iterador de Round Robin para cada servicio
-# Estructura: { "traffic_service": cycle([url1, url2]), ... }
 rr_generators = {}
+
+circuit_breaker = pybreaker.CircuitBreaker(fail_max=3, reset_timeout=30)
+
+
+@circuit_breaker
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(1),
+       retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException)))
+async def forward_request(method, url, headers, content, params):
+    # Añadimos un span manual si queremos detalle extra (opcional, FastAPIInstrumentor ya hace mucho)
+    tracer = trace.get_tracer(__name__)
+    with tracer.start_as_current_span("gateway_forwarding"):
+        response = await client.request(
+            method=method, url=url, headers=headers, content=content, params=params, timeout=5.0
+        )
+        if 500 <= response.status_code < 600:
+            raise httpx.RequestError(f"Server Error {response.status_code}")
+        return response
 
 
 async def get_next_service_url(service_name: str):
-    """
-    1. Consulta a Consul las instancias disponibles del servicio.
-    2. Aplica Round-Robin para elegir una.
-    """
-    try:
-        # Consultamos a Consul (DNS o API)
-        resp = await client.get(f"{CONSUL_URL}/{service_name}")
-        instances = resp.json()
-
-        if not instances:
-            raise HTTPException(status_code=503, detail=f"Servicio '{service_name}' no disponible en Consul")
-
-        # Construimos las URLs base de las instancias (ej: http://172.18.0.5:8000)
-        service_urls = [
-            f"http://{node['ServiceAddress']}:{node['ServicePort']}"
-            for node in instances
-        ]
-
-        # Gestión del Round Robin
-        if service_name not in rr_generators:
-            # Creamos un iterador infinito ciclico
-            rr_generators[service_name] = itertools.cycle(service_urls)
-            # Nota: Si la lista de servicios cambia dinámicamente, esto debería refrescarse.
-            # Para esta práctica, simplificamos asumiendo que si cambia, reiniciamos o refrescamos la lógica.
-            # Una mejora sería actualizar el ciclo si cambia el número de instancias.
-            # Para hacerlo simple: regeneramos el ciclo en cada llamada si queremos ser muy dinámicos,
-            # pero perdemos el estado del turno.
-            # Vamos a regenerar el ciclo SOLO si detectamos cambio de longitud para mantener la simpleza:
-            # (Omitido por brevedad, usaremos el ciclo simple, si falla se reintenta)
-
-        # Obtenemos el siguiente en el turno
-        # Truco: para asegurar que el ciclo usa las URLs frescas, en un entorno real
-        # se usa una lógica más compleja. Aquí, para que funcione el balanceo simple:
-        # Simplemente rotamos manualmente la lista obtenida de consul si no queremos persistir estado complejo.
-
-        # IMPLEMENTACIÓN SIMPLE DE ROUND ROBIN SIN ESTADO PERSISTENTE COMPLEJO:
-        # Usamos una variable global contador (o random) es más fácil para empezar,
-        # pero itertools.cycle es lo pythonico.
-        # Para evitar complicaciones de caché:
-        next_url = next(rr_generators[service_name])
-
-        # Pequeña validación por si las instancias cambiaron drásticamente (opcional)
-        if next_url not in service_urls:
-            rr_generators[service_name] = itertools.cycle(service_urls)
+    tracer = trace.get_tracer(__name__)
+    with tracer.start_as_current_span("consul_discovery"):
+        try:
+            resp = await client.get(f"{CONSUL_URL}/{service_name}")
+            instances = resp.json()
+            if not instances:
+                raise HTTPException(status_code=503, detail=f"Servicio '{service_name}' no disponible")
+            service_urls = [f"http://{node['ServiceAddress']}:{node['ServicePort']}" for node in instances]
+            if service_name not in rr_generators:
+                rr_generators[service_name] = itertools.cycle(service_urls)
             next_url = next(rr_generators[service_name])
-
-        return next_url
-
-    except Exception as e:
-        print(f"Error contactando Consul: {e}")
-        raise HTTPException(status_code=503, detail="Error de descubrimiento de servicios")
+            if next_url not in service_urls:
+                rr_generators[service_name] = itertools.cycle(service_urls)
+                next_url = next(rr_generators[service_name])
+            return next_url
+        except Exception as e:
+            print(f"Error contactando Consul: {e}")
+            raise HTTPException(status_code=503, detail="Error de descubrimiento")
 
 
 @app.get("/")
 async def root():
-    return {"message": "Wakanda Gateway Online"}
+    return {"message": "Wakanda Gateway Online (Observability Active)"}
 
 
-# --- PROXY GENÉRICO ---
-# Captura cualquier método (GET, POST, etc) a una ruta que empiece por /traffic
-# y la redirige al servicio 'traffic_service'
+@app.api_route("/{service_key}/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def gateway_proxy(service_key: str, path: str, request: Request):
+    service_map = {
+        "traffic": "traffic_service",
+        "energy": "energy_service",
+        "water": "water_service",
+        "waste": "waste_service",
+        "security": "security_service"
+    }
+    if service_key not in service_map:
+        raise HTTPException(status_code=404, detail=f"Servicio '{service_key}' no mapeado")
 
-@app.api_route("/traffic/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
-async def traffic_proxy(path: str, request: Request):
-    # 1. Descubrir dónde está el servicio
-    base_url = await get_next_service_url("traffic_service")
+    target_service = service_map[service_key]
 
-    # 2. Construir la URL destino (ej: http://ip_servicio:8000/status)
-    # Nota: 'path' es lo que viene después de /traffic/
+    try:
+        base_url = await get_next_service_url(target_service)
+    except HTTPException as e:
+        raise e
+
     dest_url = f"{base_url}/{path}"
 
-    # 3. Reenviar la petición (Proxy)
     try:
-        # Leemos el body si existe
         body = await request.body()
-
-        response = await client.request(
-            method=request.method,
-            url=dest_url,
-            headers=request.headers.raw,  # Pasamos headers originales
-            content=body,
-            timeout=5.0
+        params = request.query_params
+        response = await forward_request(
+            method=request.method, url=dest_url, headers=request.headers.raw, content=body, params=params
         )
-
         return JSONResponse(content=response.json(), status_code=response.status_code)
-    except httpx.RequestError as exc:
-        raise HTTPException(status_code=502, detail=f"Error conectando con microservicio: {exc}")
+    except pybreaker.CircuitBreakerError:
+        raise HTTPException(status_code=503, detail="Circuit Breaker Abierto")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Fallo upstream: {exc}")
 
 
-# Cuando arranca la app
 @app.on_event("startup")
 async def startup_event():
-    print("Gateway iniciado. Conectando a Consul...")
+    print("Gateway iniciado.")
 
 
 @app.on_event("shutdown")
