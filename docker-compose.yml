@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  # --- Service Registry (Consul) ---
+  consul:
+    image: consul:1.15
+    ports:
+      - "8500:8500"
+    command: agent -server -bind=0.0.0.0 -client=0.0.0.0 -bootstrap-expect=1 -ui
+    networks:
+      - wakanda-net
+
+  # --- Observabilidad: Tracing (Jaeger) ---
+  jaeger:
+    image: jaegertracing/all-in-one:1.47
+    ports:
+      - "16686:16686" # UI
+      - "6831:6831/udp" # Agent compact
+    environment:
+      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
+    networks:
+      - wakanda-net
+
+  # --- Observabilidad: Métricas (Prometheus) ---
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    networks:
+      - wakanda-net
+
+  gateway:
+    build: ./services/gateway
+    ports:
+      - "8000:8000"
+    depends_on:
+      - consul
+    environment:
+      - CONSUL_HTTP_ADDR=consul:8500
+    networks:
+      - wakanda-net
+
+networks:
+  wakanda-net:
+    driver: bridge
