@@ -1,0 +1,99 @@
+services:
+  consul:
+    image: consul:1.15
+    ports:
+      - "8500:8500"
+    command: agent -server -bind=0.0.0.0 -client=0.0.0.0 -bootstrap-expect=1 -ui
+    networks:
+      - wakanda-net
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.47
+    ports:
+      - "16686:16686"
+      - "6831:6831/udp"
+    environment:
+      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
+    networks:
+      - wakanda-net
+
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    networks:
+      - wakanda-net
+  gateway:
+    build: ./services/gateway
+    ports:
+      - "8000:8000"
+    depends_on:
+      - consul
+    environment:
+      - CONSUL_HTTP_ADDR=consul:8500
+    networks:
+      - wakanda-net
+
+  # --- MICROSERVICIOS DE NEGOCIO ---
+  traffic:
+    build: ./services/traffic
+    environment:
+      - CONSUL_HOST=consul
+    networks:
+      - wakanda-net
+    depends_on:
+      - consul
+
+  energy:
+    build: ./services/energy
+    environment:
+      - CONSUL_HOST=consul
+    networks:
+      - wakanda-net
+    depends_on:
+      - consul
+
+  water:
+    build: ./services/water
+    environment:
+      - CONSUL_HOST=consul
+    networks:
+      - wakanda-net
+    depends_on:
+      - consul
+
+  waste:
+    build: ./services/waste
+    environment:
+      - CONSUL_HOST=consul
+    networks:
+      - wakanda-net
+    depends_on:
+      - consul
+
+  security:
+    build: ./services/security
+    environment:
+      - CONSUL_HOST=consul
+    networks:
+      - wakanda-net
+    depends_on:
+      - consul
+
+  # --- VISUALIZACION (GRAFANA) ---
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    networks:
+      - wakanda-net
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus
+
+networks:
+  wakanda-net:
+    driver: bridge

@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wakanda Smart City | Control Center</title>
+    <style>
+        :root {
+            --primary: #8a2be2; /* Wakanda Purple */
+            --bg: #0b0c10;
+            --card-bg: #1f2833;
+            --text: #c5c6c7;
+            --highlight: #66fcf1;
+            --success: #45a29e;
+            --danger: #ff4d4d;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 20px;
+        }
+
+        header {
+            text-align: center;
+            padding: 20px;
+            border-bottom: 2px solid var(--primary);
+            margin-bottom: 40px;
+        }
+
+        h1 {
+            color: var(--primary);
+            text-transform: uppercase;
+            letter-spacing: 3px;
+            margin: 0;
+            font-size: 2.5rem;
+        }
+
+        .subtitle {
+            color: var(--highlight);
+            font-size: 1rem;
+        }
+
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            border: 1px solid #333;
+            transition: transform 0.2s;
+        }
+
+        .card:hover {
+            transform: translateY(-5px);
+            border-color: var(--primary);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            border-bottom: 1px solid #444;
+            padding-bottom: 10px;
+        }
+
+        .card-title {
+            font-size: 1.2rem;
+            font-weight: bold;
+            color: var(--highlight);
+        }
+
+        .status-dot {
+            height: 12px;
+            width: 12px;
+            background-color: #555;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        .status-online { background-color: var(--success); box-shadow: 0 0 8px var(--success); }
+        .status-offline { background-color: var(--danger); box-shadow: 0 0 8px var(--danger); }
+
+        .data-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 8px 0;
+            font-size: 0.95rem;
+        }
+
+        .data-value {
+            font-weight: bold;
+            color: white;
+        }
+
+        .instance-id {
+            font-size: 0.7rem;
+            color: #666;
+            margin-top: 10px;
+            text-align: right;
+            font-family: monospace;
+        }
+
+        .loading {
+            text-align: center;
+            color: #666;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>Wakanda Smart City</h1>
+        <div class="subtitle">Sistema de Gestión Centralizada v1.0</div>
+    </header>
+
+    <div class="dashboard">
+        <div class="card" id="card-traffic">
+            <div class="card-header">
+                <span class="card-title">🚦 Tráfico Urbano</span>
+                <span class="status-dot status-offline" id="status-traffic"></span>
+            </div>
+            <div id="data-traffic">
+                <p class="loading">Conectando con sensores...</p>
+            </div>
+        </div>
+
+        <div class="card" id="card-energy">
+            <div class="card-header">
+                <span class="card-title">⚡ Red Energética</span>
+                <span class="status-dot status-offline" id="status-energy"></span>
+            </div>
+            <div id="data-energy">
+                <p class="loading">Sincronizando red...</p>
+            </div>
+        </div>
+
+        <div class="card" id="card-security">
+            <div class="card-header">
+                <span class="card-title">🛡️ Seguridad</span>
+                <span class="status-dot status-offline" id="status-security"></span>
+            </div>
+            <div id="data-security">
+                <p class="loading">Escaneando...</p>
+            </div>
+        </div>
+
+        <div class="card" id="card-water">
+            <div class="card-header">
+                <span class="card-title">💧 Suministro Agua</span>
+                <span class="status-dot status-offline" id="status-water"></span>
+            </div>
+            <div id="data-water">
+                <p class="loading">Midiendo presión...</p>
+            </div>
+        </div>
+
+        <div class="card" id="card-waste">
+            <div class="card-header">
+                <span class="card-title">♻️ Gestión Residuos</span>
+                <span class="status-dot status-offline" id="status-waste"></span>
+            </div>
+            <div id="data-waste">
+                <p class="loading">Verificando contenedores...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Función para actualizar una tarjeta
+        async function updateService(serviceName, endpoint, elementId, fields) {
+            const statusDot = document.getElementById(`status-${elementId}`);
+            const dataDiv = document.getElementById(`data-${elementId}`);
+
+            try {
+                const response = await fetch(`/${serviceName}/${endpoint}`);
+
+                if (!response.ok) throw new Error('Network error');
+
+                const data = await response.json();
+
+                // Actualizar estado a ONLINE
+                statusDot.className = 'status-dot status-online';
+
+                // Construir HTML de datos
+                let html = '';
+                for (const [key, label] of Object.entries(fields)) {
+                    if (data[key] !== undefined) {
+                        html += `
+                            <div class="data-row">
+                                <span>${label}:</span>
+                                <span class="data-value">${data[key]}</span>
+                            </div>`;
+                    }
+                }
+
+                // Añadir ID de instancia
+                if (data.served_by_instance) {
+                    html += `<div class="instance-id">Nodo: ${data.served_by_instance}</div>`;
+                }
+
+                dataDiv.innerHTML = html;
+
+            } catch (error) {
+                statusDot.className = 'status-dot status-offline';
+                // Solo mostramos error si estaba cargando, para no parpadear tanto
+                if (dataDiv.querySelector('.loading')) {
+                    dataDiv.innerHTML = '<p style="color:var(--danger)">Sin conexión</p>';
+                }
+            }
+        }
+
+        function refreshAll() {
+            // Trafico
+            updateService('traffic', 'status', 'traffic', {
+                'intersection_id': 'Intersección',
+                'signal_phase': 'Semáforo',
+                'vehicle_count': 'Vehículos',
+                'average_speed': 'Velocidad (km/h)'
+            });
+
+            // Energia
+            updateService('energy', 'grid', 'energy', {
+                'grid_status': 'Estado Red',
+                'total_consumption_kw': 'Consumo (kW)',
+                'renewable_contribution': 'Renovable'
+            });
+
+            // Seguridad
+            updateService('security', 'events', 'security', {
+                'alert_level': 'Nivel Alerta',
+                'active_units': 'Unidades Activas',
+                'last_incident': 'Último Incidente'
+            });
+
+            // Agua
+            updateService('water', 'pressure', 'water', {
+                'pressure_psi': 'Presión (PSI)',
+                'quality': 'Calidad',
+                'leaks_detected': 'Fugas'
+            });
+
+            // Residuos
+            updateService('waste', 'containers', 'waste', {
+                'container_001': 'Contenedor Zona A',
+                'container_002': 'Contenedor Zona B',
+                'trucks_active': 'Camiones'
+            });
+        }
+
+        // Actualizar cada 3 segundos
+        refreshAll();
+        setInterval(refreshAll, 3000);
+
+    </script>
+</body>
+</html>
